@@ -1,6 +1,7 @@
 package com.example.texttospeech
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -55,12 +57,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@SuppressLint("LocalContextConfigurationRead")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SpeechToTextScreen() {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
+
+    var selectedHistoryIndex by remember { mutableStateOf<Int?>(null) }
 
     var spokenText by remember { mutableStateOf("") }
     var audioLevel by remember { mutableStateOf(0f) }
@@ -150,6 +155,7 @@ fun SpeechToTextScreen() {
                 val result = matches?.firstOrNull()?.capitalizeFirstLetter() ?: ""
                 if (result.isNotBlank()) {
                     spokenText = result
+                    selectedHistoryIndex = null
                     speechHistory.add(0, result) // Add to top of history
 
                     // Persist history
@@ -220,15 +226,58 @@ fun SpeechToTextScreen() {
                             .padding(8.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
+                        var historyToDelete by remember { mutableStateOf<String?>(null) } // Tracks item to delete
                         speechHistory.forEachIndexed { index, text ->
                             Text(
                                 text,
                                 fontSize = 15.sp,
-                                style = MaterialTheme.typography.bodySmall
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 3, // limit to 3 lines
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, // show "..." if exceeds
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp)
+                                    .combinedClickable(
+                                        onClick = {
+                                            spokenText = text
+                                            selectedHistoryIndex = index   // ⭐ պահում ենք index-ը
+                                            scope.launch { drawerState.close() }
+                                        },
+                                        onLongClick = {
+                                            historyToDelete = text
+                                        }
+                                    )
                             )
                             if (index < speechHistory.size - 1) {
                                 Divider(modifier = Modifier.padding(vertical = 2.dp))
                             }
+                        }
+
+                        if (historyToDelete != null) {
+                            AlertDialog(
+                                onDismissRequest = { historyToDelete = null },
+                                title = { Text("Delete This Item?") },
+                                text = { Text("Are you sure you want to delete this speech history item?") },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        speechHistory.remove(historyToDelete) // Remove from UI
+                                        scope.launch {
+                                            val key = stringSetPreferencesKey("speech_history")
+                                            context.dataStore.edit { prefs ->
+                                                prefs[key] = speechHistory.toSet() // Persist updated history
+                                            }
+                                        }
+                                        historyToDelete = null
+                                    }) {
+                                        Text("Yes")
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { historyToDelete = null }) {
+                                        Text("No")
+                                    }
+                                }
+                            )
                         }
                     }
                 }
@@ -331,22 +380,52 @@ fun SpeechToTextScreen() {
                         Spacer(modifier = Modifier.height(24.dp))
                     }
 
+                    var showClearDialog by remember { mutableStateOf(false) }
+
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .align(Alignment.BottomCenter),
                     ) {
                         Box(modifier = Modifier.fillMaxWidth()) {
-                            TextButton(
-                                onClick = {
-                                    if (spokenText.isNotBlank()) {
+                            if (spokenText.isNotBlank()) {
+                                TextButton(
+                                    onClick = {
                                         clipboardManager.setText(AnnotatedString(spokenText))
+                                    },
+                                    modifier = Modifier.align(Alignment.CenterStart)
+                                ) {
+                                    Text("Copy Text 📋")
+                                }
+
+                                TextButton(
+                                    onClick = { showClearDialog = true },
+                                    modifier = Modifier.align(Alignment.CenterEnd)
+                                ) {
+                                    Text("Clear")
+                                }
+                            }
+                        }
+
+                        if (showClearDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showClearDialog = false },
+                                title = { Text("Clear Text") },
+                                text = { Text("Are you sure you want to clear the text?") },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        spokenText = ""  // Clear the text
+                                        showClearDialog = false
+                                    }) {
+                                        Text("Yes")
                                     }
                                 },
-                                modifier = Modifier.align(Alignment.CenterStart)
-                            ) {
-                                Text("Copy Text 📋")
-                            }
+                                dismissButton = {
+                                    TextButton(onClick = { showClearDialog = false }) {
+                                        Text("No")
+                                    }
+                                }
+                            )
                         }
 
                         Box(
@@ -356,7 +435,22 @@ fun SpeechToTextScreen() {
                         ) {
                             OutlinedTextField(
                                 value = spokenText,
-                                onValueChange = { spokenText = it.capitalizeFirstLetter() },
+                                onValueChange = { newValue ->
+                                    val updatedText = newValue.capitalizeFirstLetter()
+                                    spokenText = updatedText
+
+                                    selectedHistoryIndex?.let { index ->
+                                        if (index in speechHistory.indices) {
+                                            speechHistory[index] = updatedText  // ⭐ նույն տողը
+                                            scope.launch {
+                                                val key = stringSetPreferencesKey("speech_history")
+                                                context.dataStore.edit { prefs ->
+                                                    prefs[key] = speechHistory.toSet()
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(end = 60.dp),
@@ -364,6 +458,7 @@ fun SpeechToTextScreen() {
                                 maxLines = 3,
                                 shape = RoundedCornerShape(15.dp)
                             )
+
 
                             IconButton(
                                 onClick = {
